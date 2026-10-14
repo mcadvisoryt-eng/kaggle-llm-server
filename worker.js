@@ -1,0 +1,305 @@
+/**
+ * kaggle-llm-control — Cloudflare Worker
+ * ==========================================================================
+ * One always-on Worker that does three jobs:
+ *
+ *   1. CONTROL PAGE  (password-protected)
+ *        GET  /                 login / Start-Stop page
+ *        POST /api/login        set the auth cookie
+ *        POST /api/start        ENABLE the GitHub workflow, then DISPATCH it
+ *        POST /api/stop         stop the live session, then DISABLE the workflow
+ *        GET  /api/status       workflow state + live tunnel URL
+ *
+ *   2. STABLE FRONT DOOR for Open WebUI
+ *        GET/POST /v1/*         proxied to whatever tunnel the notebook registered
+ *        POST /update-tunnel    the notebook registers its trycloudflare URL here
+ *
+ *   3. HEALTH
+ *        GET  /health
+ *
+ * WHY THIS SHAPE
+ *   - A disabled workflow can't be dispatched (GitHub returns 422), so Start
+ *     must enable() first, then dispatch().
+ *   - Disabling is what stops the cron from booting the notebook again; nothing
+ *     re-enables it automatically.
+ *   - Quick-tunnel URLs change every session, so /v1 points at this Worker and
+ *     the Worker follows the current tunnel via KV.
+ *
+ * BINDINGS / VARIABLES (Worker > Settings > Variables)
+ *   GITHUB_TOKEN    secret  fine-grained PAT: Actions=write, Contents=read on the repo
+ *   GITHUB_REPO     text    "owner/repo"
+ *   WORKFLOW_FILE   text    "kaggle-schedule.yml"
+ *   GITHUB_REF      text    "main"           (default branch)
+ *   PANEL_PASS      secret  password for the control page
+ *   WORKER_SECRET   secret  shared with the notebook (tunnel registration)
+ *   API_KEY         secret  bearer key Open WebUI sends to /v1
+ *   NTFY_TOPIC      text    optional ntfy.sh topic for start/stop pings
+ *   TUNNEL_KV       KV      namespace binding (stores the live tunnel URL)
+ * ==========================================================================
+ */
+
+const JSON_HEADERS = { "content-type": "application/json" };
+
+function json(obj, status = 200, extra = {}) {
+  return new Response(JSON.stringify(obj), { status, headers: { ...JSON_HEADERS, ...extra } });
+}
+
+// ------------------------------------------------------------------ auth
+async function sha256hex(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function timingSafeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let out = 0;
+  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return out === 0;
+}
+
+function readCookie(request, name) {
+  const c = request.headers.get("Cookie") || "";
+  const m = c.match(new RegExp("(?:^|;\\s*)" + name + "=([^;]+)"));
+  return m ? m[1] : "";
+}
+
+async function isAuthed(request, env) {
+  const expected = await sha256hex("panel:" + (env.PANEL_PASS || ""));
+  const got = readCookie(request, "kaggle_llm_auth");
+  return got && timingSafeEqual(got, expected);
+}
+
+// ------------------------------------------------------------------ GitHub API
+async function gh(env, path, method = "GET", body = null) {
+  return fetch(`https://api.github.com/repos/${env.GITHUB_REPO}${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "kaggle-llm-control",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+}
+
+async function notify(env, title, message, tags = "robot", priority = "default") {
+  if (!env.NTFY_TOPIC) return;
+  try {
+    await fetch(`https://ntfy.sh/${env.NTFY_TOPIC}`, {
+      method: "POST",
+      body: message,
+      headers: { Title: title, Tags: tags, Priority: priority },
+    });
+  } catch (e) { /* best effort */ }
+}
+
+// ------------------------------------------------------------------ HTML
+const LOGIN_HTML = `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Kaggle LLM — login</title>
+<style>body{font-family:system-ui,Segoe UI,Roboto,sans-serif;background:#0f1117;color:#e8eaed;
+display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
+form{background:#171a22;border:1px solid #262b36;border-radius:14px;padding:2rem;width:300px}
+h1{font-size:1.1rem;margin:0 0 1rem}input{width:100%;box-sizing:border-box;padding:.7rem;margin-bottom:.8rem;
+border-radius:9px;border:1px solid #2c3340;background:#0b0d12;color:#e8eaed;font:inherit}
+button{width:100%;padding:.75rem;border:0;border-radius:9px;background:#2563eb;color:#fff;font:inherit;font-weight:600;cursor:pointer}
+.err{color:#ff6b6b;font-size:.85rem;margin-bottom:.6rem}</style></head>
+<body><form method="POST" action="/api/login">
+<h1>Kaggle LLM control</h1>__ERR__
+<input type="password" name="password" placeholder="Password" autofocus required>
+<button>Log in</button></form></body></html>`;
+
+const PANEL_HTML = `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Kaggle LLM control</title>
+<style>
+body{font-family:system-ui,Segoe UI,Roboto,sans-serif;background:#0f1117;color:#e8eaed;margin:0;padding:2rem}
+.card{max-width:660px;margin:0 auto;background:#171a22;border:1px solid #262b36;border-radius:14px;padding:1.6rem}
+h1{font-size:1.25rem;margin:0 0 .2rem}.sub{color:#9aa0aa;font-size:.9rem;margin-bottom:1.2rem}
+.row{display:flex;gap:1.4rem;margin:.8rem 0 1.4rem}
+.stat{flex:1}.lbl{color:#9aa0aa;font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
+.val{font-weight:600;margin-top:.2rem;word-break:break-all}
+.on{color:#3ddc84}.off{color:#ff6b6b}.wait{color:#e0b040}
+button{font:inherit;font-weight:600;border:0;border-radius:10px;padding:.85rem 1.5rem;cursor:pointer;margin-right:.6rem}
+.start{background:#0a7d32;color:#fff}.stop{background:#b00020;color:#fff}
+button:disabled{opacity:.4;cursor:not-allowed}
+code{background:#0b0d12;padding:.15rem .4rem;border-radius:6px;font-size:.82rem;word-break:break-all}
+.log{margin-top:1.2rem;color:#9aa0aa;font-size:.82rem;min-height:1.2em}
+</style></head><body><div class="card">
+<h1>Kaggle LLM server</h1>
+<div class="sub">control plane — workflow + tunnel</div>
+<div class="row">
+  <div class="stat"><div class="lbl">Workflow</div><div class="val" id="wf">…</div></div>
+  <div class="stat"><div class="lbl">Live session</div><div class="val" id="tn">…</div></div>
+</div>
+<button class="start" id="btnStart" onclick="act('start')">Start</button>
+<button class="stop"  id="btnStop"  onclick="act('stop')">Stop</button>
+<div class="log" id="log"></div>
+</div>
+<script>
+async function refresh(){
+  try{
+    const r = await fetch('/api/status'); const d = await r.json();
+    const wf = document.getElementById('wf'), tn = document.getElementById('tn');
+    if(d.workflow === 'active'){ wf.textContent='enabled'; wf.className='val on'; }
+    else if(d.workflow){ wf.textContent=d.workflow; wf.className='val off'; }
+    else { wf.textContent='unknown'; wf.className='val wait'; }
+    if(d.tunnel){ tn.textContent=d.tunnel; tn.className='val on'; }
+    else { tn.textContent='none (press Start)'; tn.className='val off'; }
+    document.getElementById('btnStart').disabled = (d.workflow==='active');
+    document.getElementById('btnStop').disabled  = (d.workflow!=='active' && !d.tunnel);
+  }catch(e){ document.getElementById('log').textContent='status error: '+e; }
+}
+async function act(a){
+  const log=document.getElementById('log');
+  log.textContent = a==='start' ? 'Enabling workflow + dispatching…' : 'Stopping session + disabling workflow…';
+  document.getElementById('btnStart').disabled=document.getElementById('btnStop').disabled=true;
+  try{
+    const r = await fetch('/api/'+a, {method:'POST'});
+    const d = await r.json();
+    log.textContent = d.message || JSON.stringify(d);
+  }catch(e){ log.textContent='error: '+e; }
+  setTimeout(refresh, 1200);
+}
+refresh(); setInterval(refresh, 15000);
+</script></body></html>`;
+
+// ------------------------------------------------------------------ handlers
+async function handleLogin(request, env) {
+  const form = await request.formData();
+  const pass = String(form.get("password") || "");
+  if (!env.PANEL_PASS || !timingSafeEqual(pass, env.PANEL_PASS)) {
+    return new Response(LOGIN_HTML.replace("__ERR__", '<div class="err">Wrong password.</div>'),
+      { status: 401, headers: { "content-type": "text/html" } });
+  }
+  const token = await sha256hex("panel:" + env.PANEL_PASS);
+  return new Response("", {
+    status: 302,
+    headers: {
+      Location: "/",
+      "Set-Cookie": `kaggle_llm_auth=${token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=2592000`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+async function handleStatus(env) {
+  let wfState = null;
+  try {
+    const r = await gh(env, `/actions/workflows/${env.WORKFLOW_FILE}`);
+    if (r.ok) wfState = (await r.json()).state; // active | disabled_manually | disabled_inactivity
+  } catch (e) {}
+  const tunnel = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
+  return json({ workflow: wfState, tunnel });
+}
+
+async function handleStart(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const delay = Math.max(0, Math.min(60, parseInt(body.delay_min ?? "0", 10) || 0));
+
+  // 1. enable first — a disabled workflow cannot be dispatched (GitHub 422)
+  const en = await gh(env, `/actions/workflows/${env.WORKFLOW_FILE}/enable`, "PUT");
+  if (!en.ok && en.status !== 204) {
+    return json({ ok: false, message: `enable failed (${en.status}): ${await en.text()}` }, 502);
+  }
+  // 2. dispatch it
+  const dp = await gh(env, `/actions/workflows/${env.WORKFLOW_FILE}/dispatches`, "POST", {
+    ref: env.GITHUB_REF || "main",
+    inputs: { action: "start", delay_min: String(delay) },
+  });
+  if (!dp.ok && dp.status !== 204) {
+    return json({ ok: false, message: `dispatch failed (${dp.status}): ${await dp.text()}` }, 502);
+  }
+  await notify(env, "Kaggle LLM — starting", `Workflow enabled + dispatched (delay ${delay}m).`, "green_circle", "high");
+  return json({ ok: true, message: `Workflow enabled and dispatched${delay ? ` (delay ${delay}m)` : ""}. Notebook will boot shortly.` });
+}
+
+async function handleStop(request, env) {
+  // 1. ask the live session to shut down gracefully (best effort)
+  let stopped = false;
+  try {
+    const tunnel = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
+    const tok = env.TUNNEL_KV ? await env.TUNNEL_KV.get("control_token") : null;
+    if (tunnel) {
+      const r = await fetch(tunnel.replace(/\/$/, "") + "/admin/stop", {
+        method: "POST",
+        headers: { "X-Control-Token": tok || "" },
+        signal: AbortSignal.timeout(8000),
+      });
+      stopped = r.ok;
+    }
+  } catch (e) { /* session may already be gone */ }
+  // 2. disable the workflow so the cron can't restart it
+  const dis = await gh(env, `/actions/workflows/${env.WORKFLOW_FILE}/disable`, "PUT");
+  if (!dis.ok && dis.status !== 204) {
+    return json({ ok: false, message: `disable failed (${dis.status}): ${await dis.text()}` }, 502);
+  }
+  await notify(env, "Kaggle LLM — stopped", `Workflow disabled. Live session ${stopped ? "asked to stop" : "not reachable (already down)"}.`, "red_circle", "high");
+  return json({ ok: true, message: `Workflow disabled. ${stopped ? "Live session is shutting down." : "No live session was reachable."}` });
+}
+
+async function handleUpdateTunnel(request, env) {
+  if (request.headers.get("X-Worker-Secret") !== env.WORKER_SECRET) {
+    return json({ error: "forbidden" }, 403);
+  }
+  const body = await request.json().catch(() => ({}));
+  if (!body.url) return json({ error: "url required" }, 400);
+  if (env.TUNNEL_KV) {
+    await env.TUNNEL_KV.put("tunnel:default", String(body.url));
+    if (body.control_token) await env.TUNNEL_KV.put("control_token", String(body.control_token));
+  }
+  await notify(env, "Kaggle LLM — session up", `Tunnel: ${body.url}`, "white_check_mark", "default");
+  return json({ ok: true });
+}
+
+async function handleProxy(request, env, rest) {
+  const auth = request.headers.get("Authorization") || "";
+  if (env.API_KEY && auth !== `Bearer ${env.API_KEY}`) {
+    return json({ error: { message: "invalid API key", type: "unauthorized" } }, 401);
+  }
+  const tunnel = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
+  if (!tunnel) {
+    return json({ error: { message: "No live session. Open the control page and press Start.", type: "no_session" } }, 503);
+  }
+  const target = tunnel.replace(/\/$/, "") + "/v1/" + rest;
+  const proxied = new Request(target, request);
+  proxied.headers.set("X-Forwarded-Host", new URL(request.url).host);
+  return fetch(proxied);
+}
+
+// ------------------------------------------------------------------ router
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    const path = url.pathname;
+
+    // --- public ---
+    if (path === "/health") return json({ ok: true, service: "kaggle-llm-control" });
+
+    if (path === "/update-tunnel" && request.method === "POST") {
+      return handleUpdateTunnel(request, env);
+    }
+
+    if (path.startsWith("/v1/")) {
+      return handleProxy(request, env, path.slice(4));
+    }
+
+    // --- login ---
+    if (path === "/api/login" && request.method === "POST") {
+      return handleLogin(request, env);
+    }
+
+    // --- everything below needs the panel password ---
+    if (!(await isAuthed(request, env))) {
+      if (path.startsWith("/api/")) return json({ error: "unauthorized" }, 401);
+      return new Response(LOGIN_HTML.replace("__ERR__", ""), { headers: { "content-type": "text/html" } });
+    }
+
+    if (path === "/") return new Response(PANEL_HTML, { headers: { "content-type": "text/html" } });
+    if (path === "/api/status") return handleStatus(env);
+    if (path === "/api/start" && request.method === "POST") return handleStart(request, env);
+    if (path === "/api/stop" && request.method === "POST") return handleStop(request, env);
+
+    return json({ error: "not found" }, 404);
+  },
+};
