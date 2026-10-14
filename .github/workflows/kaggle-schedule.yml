@@ -58,8 +58,8 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Kaggle CLI (pinned for legacy auth)
-        run: pip install kaggle==1.6.17
+      - name: Install Kaggle CLI
+        run: pip install --quiet kaggle==1.8.3
 
       - name: Decide action
         id: decide
