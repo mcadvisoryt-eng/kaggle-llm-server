@@ -1,0 +1,26 @@
+# ============================================================================
+# Kaggle Kernel Logs — fetch status + latest log for the notebook session
+# Place at: .github/workflows/kaggle-logs.yml
+# ============================================================================
+name: Kaggle Kernel Logs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  logs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet kaggle==1.8.3
+      - name: Fetch kernel status + log
+        env:
+          KAGGLE_JSON: ${{ secrets.KAGGLE_JSON }}
+        run: python fetch_kernel_log.py
