@@ -28,7 +28,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Kaggle CLI
-        run: pip install --quiet kaggle==1.6.17
+        run: pip install --quiet kaggle==1.8.3
 
       - name: Create/update the private config dataset
         env:

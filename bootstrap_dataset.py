@@ -70,6 +70,11 @@ def main():
     ds = f"{user}/{DATASET_TITLE}"
     print("dataset id:", ds)
 
+    # --- diagnostics ---
+    print("DIAG key_is_new_style_KGAT:", str(key).startswith("KGAT"), "| key_len:", len(str(key)))
+    print("DIAG kaggle version:", subprocess.run(["kaggle", "--version"], capture_output=True, text=True).stdout.strip())
+    run(["kaggle", "kernels", "list", "-m", "--user", user])
+
     if run(["kaggle", "datasets", "files", ds]) != 0:
         print("dataset does not exist -> creating")
         rc = run(["kaggle", "datasets", "create", "-p", "cfg"])
