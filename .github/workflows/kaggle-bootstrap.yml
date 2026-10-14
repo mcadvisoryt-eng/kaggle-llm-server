@@ -1,0 +1,40 @@
+# ============================================================================
+# Kaggle Bootstrap — create the private config dataset (run once, re-runnable)
+# Place at: .github/workflows/kaggle-bootstrap.yml
+# ============================================================================
+# Writes a private Kaggle dataset (kaggle-llm-config) containing config.env
+# with WORKER_URL / WORKER_SECRET / API_KEY / PANEL_PASS, so the notebook can
+# read its runtime config from /kaggle/input without any Kaggle Secrets UI work.
+#
+# Reads repo secrets: KAGGLE_JSON, WORKER_SECRET, API_KEY, PANEL_PASS.
+# ============================================================================
+name: Kaggle Bootstrap
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Kaggle CLI
+        run: pip install --quiet kaggle==1.6.17
+
+      - name: Create/update the private config dataset
+        env:
+          KAGGLE_JSON: ${{ secrets.KAGGLE_JSON }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          API_KEY: ${{ secrets.API_KEY }}
+          PANEL_PASS: ${{ secrets.PANEL_PASS }}
+          WORKER_URL: https://kaggle-llm-control.joshifreefire-joshi.workers.dev
+        run: python bootstrap_dataset.py
