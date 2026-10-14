@@ -1,16 +1,20 @@
 # ============================================================================
-# Deploy the Cloudflare Worker (kaggle-llm-control)
+# Deploy the Cloudflare Worker (kaggle-llm-control) + push its secrets
 # Place at: .github/workflows/deploy-worker.yml
 # ============================================================================
 # Deploys worker.js to Cloudflare with Wrangler whenever it changes on main,
 # or on demand. Config (name, vars, KV binding) comes from wrangler.toml.
+# It then pushes the Worker's secrets from encrypted repo secrets, so no
+# credential is ever committed to this (public) repository.
 #
-# REQUIRED REPO SECRETS (Settings -> Secrets and variables -> Actions):
-#   CLOUDFLARE_API_TOKEN   <- you add this (Workers Scripts: Edit)
-#   CLOUDFLARE_ACCOUNT_ID  <- already set for you
-#
-# Worker secrets (GITHUB_TOKEN, PANEL_PASS, WORKER_SECRET, API_KEY) are NOT
-# deployed from here - set them once with `wrangler secret put` (see wrangler.toml).
+# REPO SECRETS (Settings -> Secrets and variables -> Actions):
+#   CLOUDFLARE_API_TOKEN   <- YOU add this (Edit Cloudflare Workers template)
+#   CLOUDFLARE_ACCOUNT_ID  <- already set
+#   PANEL_PASS             <- set (test value; change later)
+#   API_KEY                <- set (test value; change later)
+#   WORKER_SECRET          <- set (test value; change later)
+#   WORKER_GH_TOKEN        <- YOU add this: fine-grained PAT,
+#                             Actions: Read+write, Contents: Read on this repo
 # ============================================================================
 name: Deploy Cloudflare Worker
 
@@ -38,3 +42,24 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: deploy
+
+      - name: Push Worker secrets (from encrypted repo secrets)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          SEC_PANEL_PASS: ${{ secrets.PANEL_PASS }}
+          SEC_API_KEY: ${{ secrets.API_KEY }}
+          SEC_WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+          SEC_GH_TOKEN: ${{ secrets.WORKER_GH_TOKEN }}
+        run: |
+          put() {
+            if [ -n "$2" ]; then
+              printf '%s' "$2" | npx --yes wrangler@3 secret put "$1" --name kaggle-llm-control
+            else
+              echo "skip $1 (repo secret not set)"
+            fi
+          }
+          put PANEL_PASS    "$SEC_PANEL_PASS"
+          put API_KEY       "$SEC_API_KEY"
+          put WORKER_SECRET "$SEC_WORKER_SECRET"
+          put GITHUB_TOKEN  "$SEC_GH_TOKEN"
