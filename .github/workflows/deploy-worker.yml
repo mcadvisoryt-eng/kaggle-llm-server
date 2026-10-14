@@ -1,0 +1,40 @@
+# ============================================================================
+# Deploy the Cloudflare Worker (kaggle-llm-control)
+# Place at: .github/workflows/deploy-worker.yml
+# ============================================================================
+# Deploys worker.js to Cloudflare with Wrangler whenever it changes on main,
+# or on demand. Config (name, vars, KV binding) comes from wrangler.toml.
+#
+# REQUIRED REPO SECRETS (Settings -> Secrets and variables -> Actions):
+#   CLOUDFLARE_API_TOKEN   <- you add this (Workers Scripts: Edit)
+#   CLOUDFLARE_ACCOUNT_ID  <- already set for you
+#
+# Worker secrets (GITHUB_TOKEN, PANEL_PASS, WORKER_SECRET, API_KEY) are NOT
+# deployed from here - set them once with `wrangler secret put` (see wrangler.toml).
+# ============================================================================
+name: Deploy Cloudflare Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker.js"
+      - "wrangler.toml"
+      - ".github/workflows/deploy-worker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy with Wrangler
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy

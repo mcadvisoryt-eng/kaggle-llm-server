@@ -1,0 +1,33 @@
+name = "kaggle-llm-control"
+main = "worker.js"
+compatibility_date = "2026-10-14"
+
+# ---------------------------------------------------------------------------
+# Non-secret Worker variables. Safe to commit.
+# ---------------------------------------------------------------------------
+[vars]
+GITHUB_REPO   = "mcadvisoryt-eng/kaggle-llm-server"
+WORKFLOW_FILE = "kaggle-schedule.yml"
+GITHUB_REF    = "main"
+
+# ---------------------------------------------------------------------------
+# KV binding: stores the live tunnel URL + control token.
+#
+# Default reuses your existing "tunnel_store" namespace (you already have it,
+# so nothing to create). My keys are `tunnel:default` and `control_token`, which
+# do not collide with the WZML worker's `tunnel:_default` / `pool:_default`.
+#
+# Prefer a dedicated namespace? Create one in the dashboard and paste its id
+# below instead. KV ids are identifiers, not secrets, so committing one is fine.
+# ---------------------------------------------------------------------------
+[[kv_namespaces]]
+binding = "TUNNEL_KV"
+id      = "5a1c4323256940b38ad02987769fdec5"
+
+# ---------------------------------------------------------------------------
+# SECRETS are NOT stored here. Set them once with:
+#   npx wrangler secret put GITHUB_TOKEN     # fine-grained PAT: Actions RW + Contents R
+#   npx wrangler secret put PANEL_PASS       # control-page password
+#   npx wrangler secret put WORKER_SECRET    # shared with the Kaggle notebook
+#   npx wrangler secret put API_KEY          # bearer key Open WebUI sends
+# ---------------------------------------------------------------------------
