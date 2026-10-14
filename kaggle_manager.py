@@ -141,7 +141,7 @@ def setup_credentials():
             json.dump({"username": user, "key": key}, f)
         os.chmod(p, 0o600)
         log(f"Kaggle credentials written from KAGGLE_JSON for {user}")
-        return
+        return user
 
     user = os.environ.get("KAGGLE_USERNAME")
     key = os.environ.get("KAGGLE_KEY")
@@ -152,14 +152,52 @@ def setup_credentials():
         json.dump({"username": user, "key": key}, f)
     os.chmod(p, 0o600)
     log(f"Kaggle credentials configured for {user}")
+    return user
 
 
-def slug():
+NOTEBOOK_SLUG = "kaggle-llm-server"
+CONFIG_DATASET = "kaggle-llm-config"
+
+
+def slug(user=None):
+    """KAGGLE_NOTEBOOK if set, else '<user>/kaggle-llm-server'."""
     s = os.environ.get("KAGGLE_NOTEBOOK")
-    if not s:
-        log("ERROR: KAGGLE_NOTEBOOK is required.")
+    if s:
+        return s
+    if not user:
+        cf = os.path.expanduser("~/.kaggle/kaggle.json")
+        if os.path.exists(cf):
+            user = json.load(open(cf)).get("username")
+    if not user:
+        log("ERROR: cannot determine notebook slug (no KAGGLE_NOTEBOOK, no credentials).")
         sys.exit(1)
-    return s
+    return f"{user}/{NOTEBOOK_SLUG}"
+
+
+def write_kernel_metadata(user):
+    """Generate kernel-metadata.json so `kaggle kernels push -p .` works.
+
+    The username is only known at run time (from KAGGLE_JSON), so the metadata
+    is generated here rather than committed.
+    """
+    meta = {
+        "id": f"{user}/{NOTEBOOK_SLUG}",
+        "title": NOTEBOOK_SLUG,
+        "code_file": "kaggle-llm-server.ipynb",
+        "language": "python",
+        "kernel_type": "notebook",
+        "is_private": "true",
+        "enable_gpu": "true",
+        "enable_tpu": "false",
+        "enable_internet": "true",
+        "dataset_sources": [f"{user}/{CONFIG_DATASET}"],
+        "competition_sources": [],
+        "kernel_sources": [],
+        "model_sources": [],
+    }
+    with open("kernel-metadata.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    log(f"wrote kernel-metadata.json (id={meta['id']}, dataset={meta['dataset_sources'][0]})")
 
 
 def kaggle(args):
@@ -242,7 +280,8 @@ def main():
         print("Usage: kaggle_manager.py <start|stop|ensure|status>")
         sys.exit(1)
     action = sys.argv[1].lower()
-    setup_credentials()
+    user = setup_credentials()
+    write_kernel_metadata(user)
     log(f"=== Kaggle Manager: {action.upper()} ===")
     {"start": action_start, "stop": action_stop,
      "ensure": action_ensure, "status": action_status}.get(action, lambda: log(f"unknown action {action}"))()
