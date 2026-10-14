@@ -13,7 +13,9 @@
 #   Stop  -> PUT /disable
 #
 # REQUIRED REPO SECRETS:
-#   KAGGLE_USERNAME, KAGGLE_KEY, KAGGLE_NOTEBOOK
+#   KAGGLE_JSON        the whole kaggle.json (preferred, one paste)
+#     -- or -- KAGGLE_USERNAME + KAGGLE_KEY
+#   KAGGLE_NOTEBOOK    slug, e.g. youruser/your-notebook-title
 # OPTIONAL: NTFY_TOPIC, TG_BOT_TOKEN, TG_CHAT_ID
 # ============================================================================
 name: Kaggle LLM Schedule
@@ -75,7 +77,8 @@ jobs:
 
       - name: Run manager
         env:
-          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_JSON: ${{ secrets.KAGGLE_JSON }}          # whole kaggle.json (preferred)
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}  # or the two separate values
           KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
           KAGGLE_NOTEBOOK: ${{ secrets.KAGGLE_NOTEBOOK }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}

@@ -116,14 +116,38 @@ def notify(event, extra=""):
 
 # ------------------------------------------------------------------ Kaggle
 def setup_credentials():
-    user = os.environ.get("KAGGLE_USERNAME")
-    key = os.environ.get("KAGGLE_KEY")
-    if not user or not key:
-        log("ERROR: KAGGLE_USERNAME and KAGGLE_KEY are required.")
-        sys.exit(1)
+    """Write ~/.kaggle/kaggle.json.
+
+    Accepts EITHER a single KAGGLE_JSON secret (paste the whole contents of the
+    kaggle.json you download from Kaggle) OR the two separate values
+    KAGGLE_USERNAME + KAGGLE_KEY. KAGGLE_JSON wins if both are present.
+    """
     d = os.path.expanduser("~/.kaggle")
     os.makedirs(d, exist_ok=True)
     p = os.path.join(d, "kaggle.json")
+
+    raw = (os.environ.get("KAGGLE_JSON") or "").strip()
+    if raw:
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            log("ERROR: KAGGLE_JSON is not valid JSON — paste the kaggle.json contents verbatim.")
+            sys.exit(1)
+        user, key = obj.get("username", ""), obj.get("key", "")
+        if not user or not key:
+            log("ERROR: KAGGLE_JSON is missing 'username' or 'key'.")
+            sys.exit(1)
+        with open(p, "w") as f:
+            json.dump({"username": user, "key": key}, f)
+        os.chmod(p, 0o600)
+        log(f"Kaggle credentials written from KAGGLE_JSON for {user}")
+        return
+
+    user = os.environ.get("KAGGLE_USERNAME")
+    key = os.environ.get("KAGGLE_KEY")
+    if not user or not key:
+        log("ERROR: set KAGGLE_JSON (the whole kaggle.json) OR KAGGLE_USERNAME + KAGGLE_KEY.")
+        sys.exit(1)
     with open(p, "w") as f:
         json.dump({"username": user, "key": key}, f)
     os.chmod(p, 0o600)
