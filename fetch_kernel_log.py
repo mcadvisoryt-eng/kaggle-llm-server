@@ -29,6 +29,14 @@ def main():
     sh(["kaggle", "kernels", "status", slug])
     sh(["kaggle", "kernels", "list", "-m", "--user", user])
 
+    subprocess.run(["kaggle", "kernels", "pull", slug, "-p", "meta", "-m"], capture_output=True, text=True)
+    mp = os.path.join("meta", "kernel-metadata.json")
+    if os.path.exists(mp):
+        print("===== applied kernel-metadata.json =====", flush=True)
+        print(open(mp).read(), flush=True)
+    else:
+        print("(no pulled metadata)", flush=True)
+
     subprocess.run(["kaggle", "kernels", "output", slug, "-p", "out"], capture_output=True, text=True)
     found = False
     for root, _, files in os.walk("out"):
