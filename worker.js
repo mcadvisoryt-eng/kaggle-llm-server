@@ -272,8 +272,9 @@ function aiModels() {
   return json({ object: "list", data: AI_MODELS.map((id) => ({ id, object: "model", owned_by: "cloudflare" })) });
 }
 
-async function aiChat(request, env) {
-  const body = await request.json().catch(() => ({}));
+async function aiChat(bodyText, env) {
+  let body = {};
+  try { body = JSON.parse(bodyText || "{}"); } catch (e) {}
   const model = pickModel(env, body.model);
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const stream = !!body.stream;
@@ -351,6 +352,10 @@ async function handleProxy(request, env, rest) {
     return json({ error: { message: "invalid API key", type: "unauthorized" } }, 401);
   }
 
+  // Buffer the body once: reading it twice (proxy attempt, then AI fallback)
+  // would leave the second reader with an empty stream.
+  const bodyText = (request.method === "GET" || request.method === "HEAD") ? null : await request.text();
+
   // Kaggle session takes precedence whenever one is registered — but a dead
   // tunnel (stale KV entry, or a session that ended) must not break /v1, so
   // we fall through to Workers AI whenever the tunnel fails.
@@ -358,9 +363,11 @@ async function handleProxy(request, env, rest) {
   if (tunnel) {
     try {
       const target = tunnel.replace(/\/$/, "") + "/v1/" + rest;
-      const proxied = new Request(target, request);
-      proxied.headers.set("X-Forwarded-Host", new URL(request.url).host);
-      const resp = await fetch(proxied);
+      const headers = new Headers(request.headers);
+      headers.set("X-Forwarded-Host", new URL(request.url).host);
+      const init = { method: request.method, headers };
+      if (bodyText !== null) init.body = bodyText;
+      const resp = await fetch(new Request(target, init));
       if (resp.status < 500) return withBackend(resp, "kaggle");
     } catch (e) { /* tunnel unreachable — fall through */ }
   }
@@ -368,7 +375,7 @@ async function handleProxy(request, env, rest) {
   // Fallback: Cloudflare Workers AI — always on, no tunnel required.
   if (env.AI) {
     if (rest === "models") return withBackend(aiModels(), "workers-ai");
-    if (rest === "chat/completions") return withBackend(await aiChat(request, env), "workers-ai");
+    if (rest === "chat/completions") return withBackend(await aiChat(bodyText, env), "workers-ai");
     return json({ error: { message: "unsupported path", type: "not_found" } }, 404);
   }
 
