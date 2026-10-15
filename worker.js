@@ -145,7 +145,7 @@ async function refresh(){
     else if(d.workflow){ wf.textContent=d.workflow; wf.className='val off'; }
     else { wf.textContent='unknown'; wf.className='val wait'; }
     if(d.tunnel){ tn.textContent=d.tunnel; tn.className='val on'; }
-    else if(d.backend==='workers-ai'){ tn.textContent='Workers AI (always on)'; tn.className='val on'; }
+    else if(d.providers && d.providers.length){ tn.textContent=d.providers.join(' · '); tn.className='val on'; }
     else { tn.textContent='none (press Start)'; tn.className='val off'; }
     document.getElementById('btnStart').disabled = (d.workflow==='active');
     document.getElementById('btnStop').disabled  = (d.workflow!=='active' && !d.tunnel);
@@ -191,8 +191,9 @@ async function handleStatus(env) {
     if (r.ok) wfState = (await r.json()).state; // active | disabled_manually | disabled_inactivity
   } catch (e) {}
   const tunnel = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
-  const backend = tunnel ? "kaggle" : (env.AI ? "workers-ai" : "none");
-  return json({ workflow: wfState, tunnel, backend });
+  const providers = configuredProviders(env).map((p) => p.label || p.name);
+  const backend = tunnel ? "kaggle" : (providers[0] || "none");
+  return json({ workflow: wfState, tunnel, backend, providers });
 }
 
 async function handleStart(request, env) {
@@ -254,8 +255,16 @@ async function handleUpdateTunnel(request, env) {
   return json({ ok: true });
 }
 
-// ---------------------------------------------- Workers AI (always-on fallback)
-// Used only when no Kaggle tunnel is registered, so the Kaggle path is untouched.
+// ------------------------------------------------------- model providers
+// Ordered fallback for /v1 when no Kaggle session is serving. Every entry is
+// OpenAI-compatible; Workers AI uses the binding instead of HTTP. A provider
+// whose key isn't configured is skipped automatically.
+const PROVIDERS = [
+  { name: "google",     key: "GOOGLE_API_KEY",     base: "https://generativelanguage.googleapis.com/v1beta/openai", model: "gemini-2.5-flash",                       label: "Google AI Studio" },
+  { name: "groq",       key: "GROQ_API_KEY",       base: "https://api.groq.com/openai/v1",                          model: "openai/gpt-oss-120b",                    label: "Groq" },
+  { name: "sambanova",  key: "SAMBANOVA_API_KEY",  base: "https://api.sambanova.ai/v1",                             model: "Meta-Llama-3.3-70B-Instruct",            label: "SambaNova" },
+  { name: "openrouter", key: "OPENROUTER_API_KEY", base: "https://openrouter.ai/api/v1",                            model: "meta-llama/llama-3.3-70b-instruct:free", label: "OpenRouter" },
+];
 const AI_MODELS = [
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   "@cf/meta/llama-3.1-8b-instruct-fp8-fast",
@@ -268,14 +277,35 @@ function pickModel(env, requested) {
   return env.AI_MODEL || AI_DEFAULT;
 }
 
-function aiModels() {
-  return json({ object: "list", data: AI_MODELS.map((id) => ({ id, object: "model", owned_by: "cloudflare" })) });
+// Providers that are actually usable right now (Workers AI is a binding, so
+// it's always available when the [ai] binding is present).
+function configuredProviders(env) {
+  const list = PROVIDERS.filter((p) => env[p.key]);
+  if (env.AI) list.push({ name: "workers-ai", binding: true, model: AI_DEFAULT, label: "Cloudflare Workers AI" });
+  return list;
 }
 
-async function aiChat(bodyText, env) {
+// Resolve a requested model id back to the provider that serves it.
+function findProvider(env, requested) {
+  if (!requested) return null;
+  const http = PROVIDERS.find((p) => p.model === requested && env[p.key]);
+  if (http) return http;
+  if (AI_MODELS.includes(requested) && env.AI) return { name: "workers-ai", binding: true, model: requested, label: "Cloudflare Workers AI" };
+  return null;
+}
+
+// The model list Open WebUI sees: one id per configured provider, plus Workers AI.
+function providerModels(env) {
+  return configuredProviders(env).flatMap((p) =>
+    p.binding
+      ? AI_MODELS.map((m) => ({ id: m, object: "model", owned_by: "cloudflare" }))
+      : [{ id: p.model, object: "model", owned_by: p.name }]);
+}
+
+async function aiChat(bodyText, env, requested) {
   let body = {};
   try { body = JSON.parse(bodyText || "{}"); } catch (e) {}
-  const model = pickModel(env, body.model);
+  const model = pickModel(env, requested != null ? requested : body.model);
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const stream = !!body.stream;
   const inputs = { messages, stream };
@@ -346,40 +376,84 @@ function withBackend(resp, name) {
   return out;
 }
 
+// Forward an OpenAI-shaped request to one HTTP provider, swapping in that
+// provider's model id (so a fallback never sends Google a Groq model name).
+async function callProvider(p, env, bodyText) {
+  let body = {};
+  try { body = JSON.parse(bodyText || "{}"); } catch (e) {}
+  body.model = p.model;
+  const headers = { "content-type": "application/json", "Authorization": `Bearer ${env[p.key]}` };
+  if (p.name === "openrouter") {
+    headers["HTTP-Referer"] = "https://kaggle-llm-control.joshifreefire-joshi.workers.dev";
+    headers["X-Title"] = "kaggle-llm-control";
+  }
+  return fetch(p.base.replace(/\/$/, "") + "/chat/completions", { method: "POST", headers, body: JSON.stringify(body) });
+}
+
 async function handleProxy(request, env, rest) {
   const auth = request.headers.get("Authorization") || "";
   if (env.API_KEY && auth !== `Bearer ${env.API_KEY}`) {
     return json({ error: { message: "invalid API key", type: "unauthorized" } }, 401);
   }
 
-  // Buffer the body once: reading it twice (proxy attempt, then AI fallback)
+  // Buffer the body once: reading it twice (proxy attempt, then a provider)
   // would leave the second reader with an empty stream.
   const bodyText = (request.method === "GET" || request.method === "HEAD") ? null : await request.text();
 
-  // Kaggle session takes precedence whenever one is registered — but a dead
-  // tunnel (stale KV entry, or a session that ended) must not break /v1, so
-  // we fall through to Workers AI whenever the tunnel fails.
+  if (rest === "models") {
+    // Merge the live Kaggle model(s) with the provider list, so Open WebUI can
+    // see and select either one.
+    const local = providerModels(env);
+    const tun = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
+    if (tun) {
+      try {
+        const r = await fetch(tun.replace(/\/$/, "") + "/v1/models", { headers: { Authorization: auth } });
+        if (r.ok) {
+          const j = await r.json();
+          const remote = Array.isArray(j && j.data) ? j.data : [];
+          return withBackend(json({ object: "list", data: [...remote, ...local] }), "models");
+        }
+      } catch (e) { /* fall back to the local list */ }
+    }
+    return withBackend(json({ object: "list", data: local }), "models");
+  }
+  if (rest !== "chat/completions") {
+    return json({ error: { message: "unsupported path", type: "not_found" } }, 404);
+  }
+
+  // 1. Kaggle session first, whenever one is registered. A dead tunnel must not
+  //    break /v1, so failures fall through to the provider chain.
   const tunnel = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
   if (tunnel) {
     try {
       const target = tunnel.replace(/\/$/, "") + "/v1/" + rest;
       const headers = new Headers(request.headers);
       headers.set("X-Forwarded-Host", new URL(request.url).host);
-      const init = { method: request.method, headers };
-      if (bodyText !== null) init.body = bodyText;
-      const resp = await fetch(new Request(target, init));
+      const resp = await fetch(new Request(target, { method: request.method, headers, body: bodyText }));
       if (resp.status < 500) return withBackend(resp, "kaggle");
     } catch (e) { /* tunnel unreachable — fall through */ }
   }
 
-  // Fallback: Cloudflare Workers AI — always on, no tunnel required.
-  if (env.AI) {
-    if (rest === "models") return withBackend(aiModels(), "workers-ai");
-    if (rest === "chat/completions") return withBackend(await aiChat(bodyText, env), "workers-ai");
-    return json({ error: { message: "unsupported path", type: "not_found" } }, 404);
+  // 2. Provider chain. If the requested model names a specific provider, try
+  //    that one first, then the rest in order.
+  let requested = null;
+  try { requested = JSON.parse(bodyText || "{}").model; } catch (e) {}
+  const explicit = findProvider(env, requested);
+  let chain = configuredProviders(env);
+  if (explicit) chain = [explicit, ...chain.filter((p) => p.name !== explicit.name)];
+
+  const errors = [];
+  for (const p of chain) {
+    try {
+      const r = p.binding ? await aiChat(bodyText, env, requested) : await callProvider(p, env, bodyText);
+      if (r.status < 400) return withBackend(r, p.name);
+      errors.push(`${p.name}:${r.status}`);
+    } catch (e) {
+      errors.push(`${p.name}:${(e && e.message) || "error"}`);
+    }
   }
 
-  return json({ error: { message: "No live session and no AI binding configured.", type: "no_backend" } }, 503);
+  return json({ error: { message: `All backends failed (${errors.join(", ") || "none configured"})`, type: "no_backend" } }, 503);
 }
 
 // ------------------------------------------------------------------ router

@@ -51,6 +51,10 @@ jobs:
           SEC_API_KEY: ${{ secrets.API_KEY }}
           SEC_WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
           SEC_GH_TOKEN: ${{ secrets.WORKER_GH_TOKEN }}
+          SEC_GOOGLE: ${{ secrets.GOOGLE_API_KEY }}
+          SEC_GROQ: ${{ secrets.GROQ_API_KEY }}
+          SEC_SAMBANOVA: ${{ secrets.SAMBANOVA_API_KEY }}
+          SEC_OPENROUTER: ${{ secrets.OPENROUTER_API_KEY }}
         run: |
           put() {
             if [ -n "$2" ]; then
@@ -63,3 +67,9 @@ jobs:
           put API_KEY       "$SEC_API_KEY"
           put WORKER_SECRET "$SEC_WORKER_SECRET"
           put GITHUB_TOKEN  "$SEC_GH_TOKEN"
+          # Free model providers (each is skipped if the repo secret isn't set).
+          # The Worker tries them in this order: Google, Groq, SambaNova, OpenRouter.
+          put GOOGLE_API_KEY     "$SEC_GOOGLE"
+          put GROQ_API_KEY       "$SEC_GROQ"
+          put SAMBANOVA_API_KEY  "$SEC_SAMBANOVA"
+          put OPENROUTER_API_KEY "$SEC_OPENROUTER"

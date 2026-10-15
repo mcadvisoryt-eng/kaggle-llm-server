@@ -35,10 +35,10 @@ jobs:
           echo "===== /v1/models (no key, expect 401) ====="
           curl -sS -m 30 -o /dev/null -w "http=%{http_code}\n" "$BASE/v1/models"; echo
 
-          echo "===== /v1/chat/completions (non-stream) ====="
-          curl -sS -m 90 -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
-            -d '{"model":"@cf/meta/llama-3.1-8b-instruct-fp8-fast","messages":[{"role":"user","content":"Reply with exactly: worker ai ok"}],"stream":false}' \
-            "$BASE/v1/chat/completions"; echo; echo
+          echo "===== /v1/chat/completions (chain; X-Backend shows who answered) ====="
+          curl -sS -i -m 90 -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+            -d '{"messages":[{"role":"user","content":"Reply with exactly: it works"}],"stream":false}' \
+            "$BASE/v1/chat/completions" | head -c 900; echo; echo
 
           echo "===== /v1/chat/completions (stream, first lines) ====="
           curl -sS -m 90 -N -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
