@@ -1,0 +1,46 @@
+# ============================================================================
+# Smoke Test — verify the live Worker and the Workers AI fallback end to end
+# Place at: .github/workflows/smoke-test.yml
+# ============================================================================
+# Hits the deployed Worker from GitHub's network (which isn't restricted) and
+# prints the real responses. Re-run any time to check the whole chain.
+#
+# Uses repo secrets: API_KEY
+# ============================================================================
+name: Smoke Test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check Worker + Workers AI
+        env:
+          BASE: https://kaggle-llm-control.joshifreefire-joshi.workers.dev
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          set +e
+          echo "===== /health ====="
+          curl -sS -m 20 "$BASE/health"; echo; echo
+
+          echo "===== /v1/models (bearer) ====="
+          curl -sS -m 30 -H "Authorization: Bearer $API_KEY" "$BASE/v1/models"; echo; echo
+
+          echo "===== /v1/models (no key, expect 401) ====="
+          curl -sS -m 30 -o /dev/null -w "http=%{http_code}\n" "$BASE/v1/models"; echo
+
+          echo "===== /v1/chat/completions (non-stream) ====="
+          curl -sS -m 90 -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+            -d '{"model":"@cf/meta/llama-3.1-8b-instruct-fp8-fast","messages":[{"role":"user","content":"Reply with exactly: worker ai ok"}],"stream":false}' \
+            "$BASE/v1/chat/completions"; echo; echo
+
+          echo "===== /v1/chat/completions (stream, first lines) ====="
+          curl -sS -m 90 -N -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" \
+            -d '{"model":"@cf/meta/llama-3.1-8b-instruct-fp8-fast","messages":[{"role":"user","content":"Count 1 to 3."}],"stream":true}' \
+            "$BASE/v1/chat/completions" | head -c 600; echo
