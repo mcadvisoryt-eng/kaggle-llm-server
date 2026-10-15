@@ -292,7 +292,7 @@ async function aiChat(request, env) {
   const created = Math.floor(Date.now() / 1000);
 
   if (!stream) {
-    const text = typeof out === "string" ? out : (out && out.response) || "";
+    const text = typeof out === "string" ? out : (out && out.response != null ? String(out.response) : "");
     const u = (out && out.usage) || {};
     return json({
       id, object: "chat.completion", created, model,
@@ -321,7 +321,7 @@ async function aiChat(request, env) {
         }
         let obj;
         try { obj = JSON.parse(payload); } catch (e) { continue; }
-        const piece = obj.response != null ? obj.response : "";
+        const piece = obj.response != null ? String(obj.response) : "";
         if (!piece) continue;
         controller.enqueue(enc.encode("data: " + JSON.stringify({
           id, object: "chat.completion.chunk", created, model,
