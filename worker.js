@@ -264,6 +264,7 @@ const PROVIDERS = [
   { name: "groq",       key: "GROQ_API_KEY",       base: "https://api.groq.com/openai/v1",                          model: "openai/gpt-oss-120b",                    label: "Groq" },
   { name: "sambanova",  key: "SAMBANOVA_API_KEY",  base: "https://api.sambanova.ai/v1",                             model: "Meta-Llama-3.3-70B-Instruct",            label: "SambaNova" },
   { name: "openrouter", key: "OPENROUTER_API_KEY", base: "https://openrouter.ai/api/v1",                            model: "meta-llama/llama-3.3-70b-instruct:free", label: "OpenRouter" },
+  { name: "sarvam",     key: "SARVAM_API_KEY",     base: "https://api.sarvam.ai/v1",                                model: "sarvam-105b",                            label: "Sarvam AI" },
 ];
 const AI_MODELS = [
   "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
@@ -383,6 +384,8 @@ async function callProvider(p, env, bodyText) {
   try { body = JSON.parse(bodyText || "{}"); } catch (e) {}
   body.model = p.model;
   const headers = { "content-type": "application/json", "Authorization": `Bearer ${env[p.key]}` };
+  // Sarvam authenticates with api-subscription-key (it also accepts Bearer).
+  if (p.name === "sarvam") headers["api-subscription-key"] = env[p.key];
   if (p.name === "openrouter") {
     headers["HTTP-Referer"] = "https://kaggle-llm-control.joshifreefire-joshi.workers.dev";
     headers["X-Title"] = "kaggle-llm-control";

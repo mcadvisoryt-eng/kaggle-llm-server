@@ -55,6 +55,7 @@ jobs:
           SEC_GROQ: ${{ secrets.GROQ_API_KEY }}
           SEC_SAMBANOVA: ${{ secrets.SAMBANOVA_API_KEY }}
           SEC_OPENROUTER: ${{ secrets.OPENROUTER_API_KEY }}
+          SEC_SARVAM: ${{ secrets.SARVAM_API_KEY }}
         run: |
           put() {
             if [ -n "$2" ]; then
@@ -73,3 +74,4 @@ jobs:
           put GROQ_API_KEY       "$SEC_GROQ"
           put SAMBANOVA_API_KEY  "$SEC_SAMBANOVA"
           put OPENROUTER_API_KEY "$SEC_OPENROUTER"
+          put SARVAM_API_KEY     "$SEC_SARVAM"
