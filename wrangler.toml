@@ -11,6 +11,14 @@ WORKFLOW_FILE = "kaggle-schedule.yml"
 GITHUB_REF    = "main"
 
 # ---------------------------------------------------------------------------
+# Workers AI binding — powers the always-on /v1 fallback used whenever no
+# Kaggle session is registered. No API token required; it ships with the
+# account and draws on the free 10,000-neuron/day allowance.
+# ---------------------------------------------------------------------------
+[ai]
+binding = "AI"
+
+# ---------------------------------------------------------------------------
 # KV binding: stores the live tunnel URL + control token.
 #
 # Default reuses your existing "tunnel_store" namespace (you already have it,

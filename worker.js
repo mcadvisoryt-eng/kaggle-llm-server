@@ -145,6 +145,7 @@ async function refresh(){
     else if(d.workflow){ wf.textContent=d.workflow; wf.className='val off'; }
     else { wf.textContent='unknown'; wf.className='val wait'; }
     if(d.tunnel){ tn.textContent=d.tunnel; tn.className='val on'; }
+    else if(d.backend==='workers-ai'){ tn.textContent='Workers AI (always on)'; tn.className='val on'; }
     else { tn.textContent='none (press Start)'; tn.className='val off'; }
     document.getElementById('btnStart').disabled = (d.workflow==='active');
     document.getElementById('btnStop').disabled  = (d.workflow!=='active' && !d.tunnel);
@@ -190,7 +191,8 @@ async function handleStatus(env) {
     if (r.ok) wfState = (await r.json()).state; // active | disabled_manually | disabled_inactivity
   } catch (e) {}
   const tunnel = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
-  return json({ workflow: wfState, tunnel });
+  const backend = tunnel ? "kaggle" : (env.AI ? "workers-ai" : "none");
+  return json({ workflow: wfState, tunnel, backend });
 }
 
 async function handleStart(request, env) {
@@ -252,19 +254,113 @@ async function handleUpdateTunnel(request, env) {
   return json({ ok: true });
 }
 
+// ---------------------------------------------- Workers AI (always-on fallback)
+// Used only when no Kaggle tunnel is registered, so the Kaggle path is untouched.
+const AI_MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/meta/llama-3.1-8b-instruct-fp8-fast",
+  "@cf/qwen/qwen3.8-27b",
+];
+const AI_DEFAULT = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+function pickModel(env, requested) {
+  if (requested && (AI_MODELS.includes(requested) || String(requested).startsWith("@cf/"))) return requested;
+  return env.AI_MODEL || AI_DEFAULT;
+}
+
+function aiModels() {
+  return json({ object: "list", data: AI_MODELS.map((id) => ({ id, object: "model", owned_by: "cloudflare" })) });
+}
+
+async function aiChat(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const model = pickModel(env, body.model);
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const stream = !!body.stream;
+  const inputs = { messages, stream };
+  if (body.max_tokens) inputs.max_tokens = body.max_tokens;
+  if (typeof body.temperature === "number") inputs.temperature = body.temperature;
+
+  let out;
+  try {
+    out = await env.AI.run(model, inputs);
+  } catch (e) {
+    return json({ error: { message: "Workers AI error: " + (e && e.message ? e.message : e), type: "upstream" } }, 502);
+  }
+
+  const id = "chatcmpl-" + Math.random().toString(36).slice(2);
+  const created = Math.floor(Date.now() / 1000);
+
+  if (!stream) {
+    const text = typeof out === "string" ? out : (out && out.response) || "";
+    const u = (out && out.usage) || {};
+    return json({
+      id, object: "chat.completion", created, model,
+      choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
+      usage: { prompt_tokens: u.prompt_tokens || 0, completion_tokens: u.completion_tokens || 0, total_tokens: u.total_tokens || 0 },
+    });
+  }
+
+  // Translate Workers AI's SSE ({"response":"..."}) into OpenAI chat chunks.
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  let buf = "", done = false;
+  const ts = new TransformStream({
+    transform(chunk, controller) {
+      buf += dec.decode(chunk, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, i).trim();
+        buf = buf.slice(i + 1);
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") {
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
+          done = true;
+          continue;
+        }
+        let obj;
+        try { obj = JSON.parse(payload); } catch (e) { continue; }
+        const piece = obj.response != null ? obj.response : "";
+        if (!piece) continue;
+        controller.enqueue(enc.encode("data: " + JSON.stringify({
+          id, object: "chat.completion.chunk", created, model,
+          choices: [{ index: 0, delta: { content: piece }, finish_reason: null }],
+        }) + "\n\n"));
+      }
+    },
+    flush(controller) {
+      if (!done) controller.enqueue(enc.encode("data: [DONE]\n\n"));
+    },
+  });
+  return new Response(out.pipeThrough(ts), {
+    headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+  });
+}
+
 async function handleProxy(request, env, rest) {
   const auth = request.headers.get("Authorization") || "";
   if (env.API_KEY && auth !== `Bearer ${env.API_KEY}`) {
     return json({ error: { message: "invalid API key", type: "unauthorized" } }, 401);
   }
+
+  // Kaggle session takes precedence whenever one is registered.
   const tunnel = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
-  if (!tunnel) {
-    return json({ error: { message: "No live session. Open the control page and press Start.", type: "no_session" } }, 503);
+  if (tunnel) {
+    const target = tunnel.replace(/\/$/, "") + "/v1/" + rest;
+    const proxied = new Request(target, request);
+    proxied.headers.set("X-Forwarded-Host", new URL(request.url).host);
+    return fetch(proxied);
   }
-  const target = tunnel.replace(/\/$/, "") + "/v1/" + rest;
-  const proxied = new Request(target, request);
-  proxied.headers.set("X-Forwarded-Host", new URL(request.url).host);
-  return fetch(proxied);
+
+  // Fallback: Cloudflare Workers AI — always on, no tunnel required.
+  if (env.AI) {
+    if (rest === "models") return aiModels();
+    if (rest === "chat/completions") return aiChat(request, env);
+    return json({ error: { message: "unsupported path", type: "not_found" } }, 404);
+  }
+
+  return json({ error: { message: "No live session and no AI binding configured.", type: "no_backend" } }, 503);
 }
 
 // ------------------------------------------------------------------ router
