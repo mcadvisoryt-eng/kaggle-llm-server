@@ -338,25 +338,37 @@ async function aiChat(request, env) {
   });
 }
 
+// Tag every response with which backend served it, so it's visible in curl/Open WebUI.
+function withBackend(resp, name) {
+  const out = new Response(resp.body, resp);
+  out.headers.set("X-Backend", name);
+  return out;
+}
+
 async function handleProxy(request, env, rest) {
   const auth = request.headers.get("Authorization") || "";
   if (env.API_KEY && auth !== `Bearer ${env.API_KEY}`) {
     return json({ error: { message: "invalid API key", type: "unauthorized" } }, 401);
   }
 
-  // Kaggle session takes precedence whenever one is registered.
+  // Kaggle session takes precedence whenever one is registered — but a dead
+  // tunnel (stale KV entry, or a session that ended) must not break /v1, so
+  // we fall through to Workers AI whenever the tunnel fails.
   const tunnel = env.TUNNEL_KV ? await env.TUNNEL_KV.get("tunnel:default") : null;
   if (tunnel) {
-    const target = tunnel.replace(/\/$/, "") + "/v1/" + rest;
-    const proxied = new Request(target, request);
-    proxied.headers.set("X-Forwarded-Host", new URL(request.url).host);
-    return fetch(proxied);
+    try {
+      const target = tunnel.replace(/\/$/, "") + "/v1/" + rest;
+      const proxied = new Request(target, request);
+      proxied.headers.set("X-Forwarded-Host", new URL(request.url).host);
+      const resp = await fetch(proxied);
+      if (resp.status < 500) return withBackend(resp, "kaggle");
+    } catch (e) { /* tunnel unreachable — fall through */ }
   }
 
   // Fallback: Cloudflare Workers AI — always on, no tunnel required.
   if (env.AI) {
-    if (rest === "models") return aiModels();
-    if (rest === "chat/completions") return aiChat(request, env);
+    if (rest === "models") return withBackend(aiModels(), "workers-ai");
+    if (rest === "chat/completions") return withBackend(await aiChat(request, env), "workers-ai");
     return json({ error: { message: "unsupported path", type: "not_found" } }, 404);
   }
 
