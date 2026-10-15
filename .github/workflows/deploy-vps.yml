@@ -1,0 +1,90 @@
+# ============================================================================
+# Deploy the WZML bot to your VPS
+# Place at: .github/workflows/deploy-vps.yml
+# ============================================================================
+# Runs deploy-vps.sh on your server over SSH. The runner reads the credentials
+# from encrypted repo secrets, so the key never appears in the repo or in chat.
+#
+# REQUIRED REPO SECRETS (Settings -> Secrets and variables -> Actions):
+#   VPS_HOST      hostname or IP of your VPS
+#   VPS_USER      SSH user (must have passwordless sudo, or be root)
+#   VPS_SSH_KEY   the PRIVATE key (paste the whole file, incl. BEGIN/END lines)
+# OPTIONAL:
+#   VPS_PORT      SSH port (defaults to 22)
+#
+# The VPS must be reachable over SSH from GitHub's runners (public IP, port open).
+# ============================================================================
+name: Deploy WZML to VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      domain:
+        description: "Domain for the web UI (optional, for HTTPS via Caddy)"
+        required: false
+        default: ""
+      skip_deps:
+        description: "Skip apt install (faster re-runs)"
+        type: boolean
+        required: false
+        default: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          set -e
+          if [ -z "$VPS_SSH_KEY" ] || [ -z "$VPS_HOST" ]; then
+            echo "::error::VPS_HOST and VPS_SSH_KEY repo secrets are required."
+            exit 1
+          fi
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          PORT="${VPS_PORT:-22}"
+          echo "PORT=$PORT" >> "$GITHUB_ENV"
+          ssh-keyscan -p "$PORT" -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Check the connection
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$PORT" -o StrictHostKeyChecking=accept-new \
+            "$VPS_USER@$VPS_HOST" \
+            'echo "connected as $(whoami)@$(hostname)"; uname -srm; (command -v sudo >/dev/null && echo "sudo: present") || echo "sudo: absent"'
+
+      - name: Copy deploy script to the VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          scp -i ~/.ssh/id_deploy -P "$PORT" deploy-vps.sh \
+            "$VPS_USER@$VPS_HOST:/tmp/deploy-vps.sh"
+
+      - name: Run the deployment
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          DOMAIN='${{ github.event.inputs.domain }}'
+          ssh -i ~/.ssh/id_deploy -p "$PORT" "$VPS_USER@$VPS_HOST" \
+            "sudo -n bash /tmp/deploy-vps.sh '$DOMAIN'"
+
+      - name: Show service status
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        if: always()
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "$PORT" "$VPS_USER@$VPS_HOST" \
+            'systemctl is-active aria2 qbittorrent wzml-bot 2>/dev/null; echo "---"; sudo -n systemctl status wzml-bot --no-pager -n 20 2>/dev/null || true'
